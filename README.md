@@ -4,7 +4,8 @@
     <summary>
       <h1> Q-learning with Adjoint Matching </h1>
       <br>
-      <h2>[<a href="https://arxiv.org/pdf/xxxx.xxxxx">Paper</a>] &emsp;|&emsp; [<a href="https://colinqiyangli.github.io/qam">Website</a>]</h2>
+      <h2>[<a href="https://arxiv.org/pdf/xxxx.xxxxx">Paper</a>]</h2>
+       <!-- &emsp;|&emsp; [<a href="https://colinqiyangli.github.io/qam">Website</a>]</h2> -->
     </summary>
   </ul>
 </div>
