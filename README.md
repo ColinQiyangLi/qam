@@ -4,7 +4,7 @@
     <summary>
       <h1> Q-learning with Adjoint Matching </h1>
       <br>
-      <h2>[<a href="https://arxiv.org/pdf/xxxx.xxxxx">Paper</a>]</h2>
+      <h2>[<a href="https://arxiv.org/pdf/2601.14234">Paper</a>]</h2>
        <!-- &emsp;|&emsp; [<a href="https://colinqiyangli.github.io/qam">Website</a>]</h2> -->
     </summary>
   </ul>
@@ -57,6 +57,6 @@ This codebase is built on top of [QC](https://github.com/colinqiyangli/qc).
   title  = {Q-learning with Adjoint Matching},
   conference = {arXiv Pre-print},
   year = {2026},
-  url = {http://arxiv.org/abs/xxxx.xxxxx},
+  url = {http://arxiv.org/abs/2601.14234},
 }
 ```
