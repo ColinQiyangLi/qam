@@ -13,10 +13,6 @@ from evaluation import evaluate
 from agents import agents
 import numpy as np
 
-if 'CUDA_VISIBLE_DEVICES' in os.environ:
-    os.environ['EGL_DEVICE_ID'] = os.environ['CUDA_VISIBLE_DEVICES']
-    os.environ['MUJOCO_EGL_DEVICE_ID'] = os.environ['CUDA_VISIBLE_DEVICES']
-
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('run_group', 'Debug', 'Run group.')
@@ -30,7 +26,7 @@ flags.DEFINE_integer('online_steps', 500000, 'Number of online steps.')
 flags.DEFINE_integer('buffer_size', 1000000, 'Replay buffer size.')
 flags.DEFINE_integer('log_interval', 5000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 50000, 'Evaluation interval.')
-flags.DEFINE_integer('save_interval', 50000, 'Save interval.')
+flags.DEFINE_integer('save_interval', 50000, 'Save interval.') # for the offline stage only.
 flags.DEFINE_integer('start_training', 5000, 'when does training start')
 
 flags.DEFINE_integer('utd_ratio', 1, "update to data ratio")
@@ -48,9 +44,7 @@ flags.DEFINE_string('ogbench_dataset_dir', None, 'OGBench dataset directory')
 flags.DEFINE_integer('horizon_length', 5, 'action chunking length.')
 flags.DEFINE_bool('sparse', False, "make the task sparse reward")
 
-flags.DEFINE_bool('save_all_online_states', False, "save all trajectories to npy")
-flags.DEFINE_bool('save_last_checkpoint', False, "do not delete the last checkpoint")
-flags.DEFINE_bool('save_replay_buffer', False, "do not delete the replay buffer in the end")
+flags.DEFINE_bool('auto_cleanup', True, "remove all intermediate checkpoints when the run finishes")
 
 flags.DEFINE_bool('balanced_sampling', False, "sample half offline and online replay buffer")
 
@@ -62,20 +56,6 @@ def restore_csv_loggers(csv_loggers, save_dir):
     for prefix, csv_logger in csv_loggers.items():
         if os.path.exists(os.path.join(save_dir, f"{prefix}_sv.csv")):
             csv_logger.restore(os.path.join(save_dir, f"{prefix}_sv.csv"))
-
-def save_buffer_env_state(buffer, env, action_queue, save_dir):
-
-    state = env.get_state()
-    env_state = {}
-    env_state["env_qpos"] = np.copy(state["qpos"])
-    env_state["env_qvel"] = np.copy(state["qvel"])
-    if "button_states" in state:
-        env_state["env_button_states"] = np.copy(state["button_states"])
-    if action_queue is None or len(action_queue) == 0:
-        pass
-    else:
-        env_state["action_queue"] = np.stack(action_queue, axis=0)
-    np.savez(os.path.join(save_dir, "buffer.npz"), **buffer, **env_state, pointer=buffer.pointer, size=buffer.size)
 
 def restore_buffer_env_state(restore_path):
     buffer_dict = np.load(os.path.join(restore_path, "buffer.npz"))
@@ -199,11 +179,10 @@ def main(_):
     csv_loggers = {prefix: CsvLogger(os.path.join(FLAGS.save_dir, f"{prefix}.csv")) 
                     for prefix in prefixes}
 
-    last_save_path = None
     if os.path.isdir(FLAGS.save_dir):
         print("trying to load from", FLAGS.save_dir)
-
         if os.path.exists(os.path.join(FLAGS.save_dir, 'token.tk')):
+            print("found existing completed run. Exiting...")
             exit()
 
         try:
@@ -214,10 +193,8 @@ def main(_):
             load_step = int(load_step)
             agent = restore_agent(agent, restore_path=FLAGS.save_dir, restore_epoch=load_step)
             restore_csv_loggers(csv_loggers, FLAGS.save_dir)
-            if load_stage == "online": # load buffer too
-                replay_buffer, env_state = restore_buffer_env_state(restore_path=FLAGS.save_dir)
-            else:
-                replay_buffer, env_state = None, None
+            assert load_stage == "offline", "online restoring is not supported"
+            replay_buffer, env_state = None, None
             success = True
         except:
             success = False
@@ -229,7 +206,6 @@ def main(_):
         load_stage = None
         load_step = None
         replay_buffer = None
-    
 
     if not success: # if failed to load, start over
         print("failed to load prev run")
@@ -244,61 +220,57 @@ def main(_):
     )
 
     # Offline RL
-    offline_init_time = time.time()
-    if load_stage is not None and load_stage == "online":
-        print("skipping offline")
+    if load_stage == "offline" and load_step is not None:
+        start_step = load_step + 1
+        print(f"restoring from offline step {start_step}")
     else:
-        if load_stage == "offline" and load_step is not None:
-            start_step = load_step + 1
-            print(f"restoring from offline step {start_step}")
+        start_step = 1
+
+    for i in tqdm.tqdm(range(start_step, FLAGS.offline_steps + 1)):
+        log_step = i
+
+        if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
+            dataset_idx = (dataset_idx + 1) % len(dataset_paths)
+            print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
+            train_dataset, val_dataset = make_ogbench_env_and_datasets(
+                FLAGS.env_name,
+                dataset_path=dataset_paths[dataset_idx],
+                compact_dataset=False,
+                dataset_only=True,
+                cur_env=env,
+            )
+            train_dataset = process_train_dataset(train_dataset)
+
+        batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
+
+        if config['agent_name'] == 'rebrac':
+            agent, offline_info = agent.update(batch, full_update=(i % config['actor_freq'] == 0))
         else:
-            start_step = 1
-        for i in tqdm.tqdm(range(start_step, FLAGS.offline_steps + 1)):
-            log_step = i
+            agent, offline_info = agent.update(batch)
 
-            if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
-                dataset_idx = (dataset_idx + 1) % len(dataset_paths)
-                print(f"Using new dataset: {dataset_paths[dataset_idx]}", flush=True)
-                train_dataset, val_dataset = make_ogbench_env_and_datasets(
-                    FLAGS.env_name,
-                    dataset_path=dataset_paths[dataset_idx],
-                    compact_dataset=False,
-                    dataset_only=True,
-                    cur_env=env,
-                )
-                train_dataset = process_train_dataset(train_dataset)
+        if i % FLAGS.log_interval == 0:
+            logger.log(offline_info, "offline_agent", step=log_step)
 
-            batch = train_dataset.sample_sequence(config['batch_size'], sequence_length=FLAGS.horizon_length, discount=discount)
+        # eval
+        if i == FLAGS.offline_steps or \
+            (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
+            # during eval, the action chunk is executed fully
+            eval_info, _, _ = evaluate(
+                agent=agent,
+                env=eval_env,
+                action_dim=example_batch["actions"].shape[-1],
+                num_eval_episodes=FLAGS.eval_episodes,
+                num_video_episodes=FLAGS.video_episodes,
+                video_frame_skip=FLAGS.video_frame_skip,
+            )
+            logger.log(eval_info, "eval", step=log_step)
             
-            if config['agent_name'] == 'rebrac':
-                agent, offline_info = agent.update(batch, full_update=(i % config['actor_freq'] == 0))
-            else:
-                agent, offline_info = agent.update(batch)
+        # saving
+        if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
+            save_csv_loggers(csv_loggers, FLAGS.save_dir)
 
-            if i % FLAGS.log_interval == 0:
-                logger.log(offline_info, "offline_agent", step=log_step)
-
-            # eval
-            if i == FLAGS.offline_steps or \
-                (FLAGS.eval_interval != 0 and i % FLAGS.eval_interval == 0):
-                # during eval, the action chunk is executed fully
-                eval_info, _, _ = evaluate(
-                    agent=agent,
-                    env=eval_env,
-                    action_dim=example_batch["actions"].shape[-1],
-                    num_eval_episodes=FLAGS.eval_episodes,
-                    num_video_episodes=FLAGS.video_episodes,
-                    video_frame_skip=FLAGS.video_frame_skip,
-                )
-                logger.log(eval_info, "eval", step=log_step)
-                
-            # saving
-            if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
-                last_save_path = save_agent(agent, FLAGS.save_dir, log_step)
-                save_csv_loggers(csv_loggers, FLAGS.save_dir)
-
-                with open(os.path.join(FLAGS.save_dir, 'progress.tk'), 'w') as f:
-                    f.write(f"offline,{i}")
+            with open(os.path.join(FLAGS.save_dir, 'progress.tk'), 'w') as f:
+                f.write(f"offline,{i}")
 
     # transition from offline to online
     if replay_buffer is None:
@@ -316,32 +288,13 @@ def main(_):
 
     # Online RL
     update_info = {}
-
-    from collections import defaultdict
-    data = defaultdict(list)
-    online_init_time = time.time()
-
-
-    if load_stage == "online" and load_step is not None and env_state is not None:
-        start_step = load_step + 1
-
-        if "action_queue" in env_state:
-            action_queue = list(np.reshape(env_state.pop("action_queue"), (-1, action_dim)))
-            print("restored action queue:", action_queue)
-        else:
-            action_queue = []
-
-        ob, info = env.reset(options={"set_state": env_state})
-        print(f"restoring from online step {start_step}")
-    else:
-        action_queue = []
-        ob, _ = env.reset()
-        start_step = 1
+    action_queue = []
+    ob, _ = env.reset()
+    start_step = 1
 
     for i in tqdm.tqdm(range(start_step, FLAGS.online_steps + 1)):
         log_step = FLAGS.offline_steps + i
         online_rng, key = jax.random.split(online_rng)
-
 
         if FLAGS.ogbench_dataset_dir is not None and FLAGS.dataset_replace_interval != 0 and i % FLAGS.dataset_replace_interval == 0:
             dataset_idx = (dataset_idx + 1) % len(dataset_paths)
@@ -380,15 +333,6 @@ def main(_):
         next_ob, int_reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
 
-        if FLAGS.save_all_online_states:
-            state = env.get_state()
-            data["steps"].append(i)
-            data["obs"].append(np.copy(next_ob))
-            data["qpos"].append(np.copy(state["qpos"]))
-            data["qvel"].append(np.copy(state["qvel"]))
-            if "button_states" in state:
-                data["button_states"].append(np.copy(state["button_states"]))
-        
         # logging useful metrics from info dict
         env_info = {}
         for key, value in info.items():
@@ -458,47 +402,19 @@ def main(_):
             )
             logger.log(eval_info, "eval", step=log_step)
 
-        # saving
-        if FLAGS.save_interval > 0 and i % FLAGS.save_interval == 0:
-            last_save_path = save_agent(agent, FLAGS.save_dir, log_step)
-            save_buffer_env_state(replay_buffer, env, action_queue, FLAGS.save_dir)
-            save_csv_loggers(csv_loggers, FLAGS.save_dir)
-            with open(os.path.join(FLAGS.save_dir, 'progress.tk'), 'w') as f:
-                f.write(f"online,{i}")
-            print("saved action queue:", action_queue)
-            print("saved buffer:", i, replay_buffer.pointer, replay_buffer.size)
-
-    end_time = time.time()
-
     for key, csv_logger in logger.csv_loggers.items():
         csv_logger.close()
-
-    if FLAGS.save_all_online_states:
-        c_data = {"steps": np.array(data["steps"]),
-                 "qpos": np.stack(data["qpos"], axis=0), 
-                 "qvel": np.stack(data["qvel"], axis=0), 
-                 "obs": np.stack(data["obs"], axis=0), 
-                 "offline_time": online_init_time - offline_init_time,
-                 "online_time": end_time - online_init_time,
-        }
-        if len(data["button_states"]) != 0:
-            c_data["button_states"] = np.stack(data["button_states"], axis=0)
-        np.savez(os.path.join(FLAGS.save_dir, "data.npz"), **c_data)
 
     with open(os.path.join(FLAGS.save_dir, 'token.tk'), 'w') as f:
         f.write(run.url)
 
     # cleanup
-
-    all_files = os.listdir(FLAGS.save_dir)
-    for relative_path in all_files:
-        full_path = os.path.join(FLAGS.save_dir, relative_path)
-        if os.path.isfile(full_path):
-            if relative_path.startswith("params"):
-                if not FLAGS.save_last_checkpoint or relative_path != last_save_path:
-                    print(f"removing {full_path}")
-                    os.remove(full_path)
-            if relative_path == "buffer.npz" and not FLAGS.save_replay_buffer:
+    if FLAGS.auto_cleanup:
+        all_files = os.listdir(FLAGS.save_dir)
+        for relative_path in all_files:
+            full_path = os.path.join(FLAGS.save_dir, relative_path)
+            if os.path.isfile(full_path) and relative_path.startswith("params"):
+                print(f"removing {full_path}")
                 os.remove(full_path)
 
     wandb.finish()
