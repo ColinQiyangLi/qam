@@ -266,11 +266,10 @@ def main(_):
 
     # Online RL
     update_info = {}
-    action_queue = []
+    action_queue = [] # for action chunking
     ob, _ = env.reset()
-    start_step = 1
 
-    for i in tqdm.tqdm(range(start_step, FLAGS.online_steps + 1)):
+    for i in tqdm.tqdm(range(1, FLAGS.online_steps + 1)):
         log_step = FLAGS.offline_steps + i
         online_rng, key = jax.random.split(online_rng)
 
@@ -293,8 +292,7 @@ def main(_):
                 for k in train_dataset:
                     replay_buffer[k][:size] = train_dataset[k][:]
 
-        
-        # during online rl, the action chunk is executed fully
+        # the action chunk is executed fully
         if len(action_queue) == 0:
 
             if FLAGS.balanced_sampling and i < FLAGS.start_training:
@@ -314,7 +312,7 @@ def main(_):
         # logging useful metrics from info dict
         env_info = {}
         for key, value in info.items():
-            if key.startswith("distance"):
+            if key.startswith("distance"): # for cubes
                 env_info[key] = value
         # always log this at every step
         logger.log(env_info, "env", step=log_step)
@@ -383,6 +381,7 @@ def main(_):
     for key, csv_logger in logger.csv_loggers.items():
         csv_logger.close()
 
+    # a token to indicate a successfully finished run
     with open(os.path.join(FLAGS.save_dir, 'token.tk'), 'w') as f:
         f.write(run.url)
 
