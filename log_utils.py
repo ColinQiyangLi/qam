@@ -18,7 +18,6 @@ def get_csv_header(path):
     with open(path, 'r') as f:
         # Use DictReader to automatically interpret the first row as headers
         dict_reader = csv.DictReader(f)
-        print(dict_reader)
         return dict_reader.fieldnames
 
 class CsvLogger:
@@ -87,9 +86,7 @@ def get_hash(s):
 def get_exp_name(flags):
     """Return the experiment name."""
     s = flags.flags_into_string()
-    # print(s)
     exp_name = s
-    print(exp_name)
     return get_hash(exp_name)
 
 
